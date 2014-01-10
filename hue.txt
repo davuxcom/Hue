@@ -1,0 +1,1270 @@
+# GENERAL
+# Philips Hue PowerShell Module by Loïc PELLETAN
+
+
+##TODO : une fois un set de lumieres réglées, exporter la conf comme profil
+##A CORRIGER : setstate
+
+function New-HueObject([string]$bridgeIP,[string]$username){
+
+    if((-not $bridgeIP) -and (-not $username)){
+        write-host "Object created with no parameters (BRIDGE_IP USERNAME). Please init first." -ForegroundColor Yellow
+    }
+
+    $myHue = New-Object PSObject            
+    Add-Member -inputobject $myHue -MemberType NoteProperty -name BridgeIP -value $bridgeIP
+    add-member -InputObject $myHue -MemberType ScriptProperty -name BridgeID -value {($this.getbridgeweb()).id}
+    add-member -InputObject $myHue -MemberType ScriptProperty -name BridgeMAC -value {($this.getfullstate()).config.mac}
+    Add-Member -inputobject $myHue -membertype NoteProperty -name UserID -value $username
+    Add-Member -inputobject $myHue -membertype ScriptProperty -name BaseURL -value {
+        if($this.bridgeIP -and $this.userID){
+            "http://" + ($this.bridgeip) + "/api/" + ($this.userID)
+        }
+        else{
+            write-host "Please init first." -ForegroundColor Red
+        }
+    }
+    add-member -inputobject $myhue -membertype ScriptProperty -name Name -value {($this.getfullstate()).config.name}
+    Add-Member -inputobject $myHue -membertype ScriptMethod -name GetBridgeWeb -value { 
+        PSHue_GetBridgeWeb    
+    }
+    Add-Member -inputobject $myHue -membertype ScriptMethod -name GetBridgeUpnp -value {            
+        PSHue_GetBridgeUpnp
+    }
+    Add-Member -inputobject $myHue -membertype ScriptMethod -name Init -value {            
+        param([string]$usrID)
+        if((-not $usrID) -and (-not $this.userID)){
+            $usrID = read-host "UserID"
+        }
+        if($usrID){
+            $this.userID = $usrID
+        }
+        if(-not $this.bridgeIP){
+            Write-Host "No IP provided. Starting hub detection via Web..."
+            $this.bridgeIP = ($this.getbridgeweb()).internalipaddress
+        }
+        if(-not $this.bridgeIP){
+            Write-Host "No IP retrieved from web. Starting hub detection via UPNP..."
+            $this.bridgeIP = ($this.getbridgeupnp()).internalipaddress
+        }
+        if($this.userID -and $this.bridgeIP){
+            if($this.userexists($this.userID)){
+                $this.fullinit()
+            }
+            else{
+                write-host "Please provide an existing user." -ForegroundColor Red
+            }
+        }
+        else{
+            Write-Host "Error while init. No IP and/or USER_ID defined." -ForegroundColor Red
+        }
+    }
+    Add-Member -inputobject $myHue -membertype ScriptMethod -name isInit {            
+        return ($this.bridgeIP -and $this.userID -and $this.baseurl -and ($this.UserExists($this.userID)))
+    }
+    Add-Member -inputobject $myHue -membertype ScriptMethod -name GetFullstate {            
+        if($this.isinit()){
+            PSHue_GetFullstate $this.bridgeIP $this.userID
+        }
+        else{
+            write-host "Please init first." -ForegroundColor Red
+        }      
+    }
+    add-member -inputobject $myhue -membertype scriptmethod -name UserExists {
+        param($user)
+        if($user){
+            PSHue_UserExists $this.bridgeIP $this.userID $user
+        }
+        else{
+            write-host "This method requires an argument : USERNAME" -ForegroundColor Red
+        }
+    }
+    add-member -inputobject $myhue -membertype ScriptMethod -name RegisterUser {
+        param($username, $appname)
+        if(($this.bridgeIP) -and ($username) -and ($appname)){
+            PSHue_RegisterUser $this.bridgeIP $username $appname
+        }
+        else{
+            write-host "Please init first and provide a USERNAME and APPNAME in parameters" -ForegroundColor Red
+        }
+    }
+    add-member -inputobject $myhue -MemberType ScriptMethod -name FullInit {
+        $data = $this.getfullstate()
+        $bridgeIP = $this.bridgeIP
+        $userID = $this.userID
+        $this.lights.clear()
+        $this.groups.clear()
+        $this.schedules.clear()
+        foreach($light in ((get-member -InputObject $data.lights -MemberType NoteProperty).name)){
+            $mylight = New-Object psobject
+            $mylight = $data.lights.$light
+            Add-Member -inputobject $mylight -membertype NoteProperty -name ID -value $light
+            Add-Member -InputObject $mylight -MemberType NoteProperty -Name BridgeIP -Value $bridgeIP
+            Add-Member -InputObject $mylight -MemberType NoteProperty -Name UserID -Value $userID
+            add-member -InputObject $mylight -MemberType ScriptMethod -Name GetLiveState {
+                PSHue_GetLight $this.bridgeip $this.userID $this.ID
+            }
+            add-member -InputObject $mylight -MemberType ScriptMethod -Name RefreshState {
+                $this.state = ($this.getlivestate()).state
+            }
+            add-member -InputObject $mylight -MemberType ScriptMethod -Name Refresh {
+                $this.state = ($this.getlivestate()).state
+                $this.name = ($this.getlivestate()).name
+            }
+            add-member -inputobject $mylight -membertype ScriptMethod -name RenameLight {
+                param([string]$newname)
+                if(($newname) -and ($newname.length -le 32)){
+                    PSHue_RenameLight $this.bridgeip $this.userID $this.ID $newname
+                    $this.refresh()
+                }
+            }
+            add-member -InputObject $mylight -MemberType ScriptMethod -Name On {
+                param($on)
+                PSHue_LightOn $this.bridgeip $this.userID $this.ID $on
+                $this.refresh()
+            }
+            add-member -InputObject $mylight -MemberType ScriptMethod -Name ColorHue {
+                param($hue,$transtime)
+                PSHue_LightColorHue $this.bridgeip $this.userID $this.ID $hue $transtime
+                $this.refresh()
+            }
+            add-member -InputObject $mylight -MemberType ScriptMethod -Name ColorSat {
+                param($sat,$transtime)
+                PSHue_LightColorSat $this.bridgeip $this.userID $this.ID $sat $transtime
+                $this.refresh()
+            }
+            add-member -InputObject $mylight -MemberType ScriptMethod -Name Brightness {
+                param($bri,$transtime)
+                PSHue_LightBrightness $this.bridgeip $this.userID $this.ID $bri $transtime
+                $this.refresh()
+            }
+            add-member -InputObject $mylight -MemberType ScriptMethod -Name WhiteTemp {
+                param($deg,$transtime)
+                PSHue_LightWhiteTemp $this.bridgeip $this.userID $this.ID $deg $transtime
+                $this.refresh()
+            }
+            add-member -InputObject $mylight -MemberType ScriptMethod -Name Loop {
+                param($on,$transtime)
+                PSHue_LightLoop $this.bridgeip $this.userID $this.ID $on $transtime
+                $this.refresh()
+            }
+            add-member -InputObject $mylight -MemberType ScriptMethod -Name ShortAlert {
+                PSHue_LightShortAlert $this.bridgeip $this.userID $this.ID
+            }
+            add-member -InputObject $mylight -MemberType ScriptMethod -Name LongAlert {
+                PSHue_LightLongAlert $this.bridgeip $this.userID $this.ID
+            }
+            add-member -InputObject $mylight -MemberType ScriptMethod -Name StopAlert {
+                PSHue_LightStopAlert $this.bridgeip $this.userID $this.ID
+            }
+            add-member -InputObject $mylight -MemberType ScriptMethod -Name SetState {
+                param($on,$bri,$hue,$sat,$xy,$ct,$alert,$effect,$transitiontime)
+                $state = PSHue_NewState $on $bri $hue $sat $xy $ct $alert $effect $transitiontime
+                PSHue_SetLightState $this.bridgeip $this.userID $this.ID $state
+                $this.refresh()
+            }
+            $this.lights.add($light,$mylight)
+        }
+
+        foreach($group in ((get-member -InputObject $data.groups -MemberType NoteProperty).name)){
+            $mygroup = New-Object psobject
+            $mygroup = $data.groups.$group
+            Add-Member -inputobject $mygroup -membertype NoteProperty -name ID -value $group
+            Add-Member -InputObject $mygroup -MemberType NoteProperty -Name BridgeIP -Value $bridgeIP 
+            Add-Member -InputObject $mygroup -MemberType NoteProperty -Name UserID -Value $userID
+            add-member -InputObject $myGroup -MemberType ScriptMethod -Name GetLiveState {
+                PSHue_GetGroup $this.bridgeip $this.userID $this.ID
+            }
+            add-member -InputObject $myGroup -MemberType ScriptMethod -Name RefreshState {
+                $this.action = ($this.getlivestate()).action
+            }
+            add-member -InputObject $myGroup -MemberType ScriptMethod -Name Refresh {
+                $this.action = ($this.getlivestate()).action
+                $this.name = ($this.getlivestate()).name
+            }
+            add-member -inputobject $myGroup -membertype ScriptMethod -name RenameGroup {
+                param([string]$newname)
+                if(($newname) -and ($newname.length -le 32)){
+                    PSHue_RenameGroup $this.bridgeip $this.userID $this.ID $newname
+                    $this.refresh()
+                }
+            }
+            add-member -inputobject $mygroup -membertype ScriptMethod -name GetLights {
+                PSHue_GroupGetLights $this.bridgeip $this.userID $this.ID
+            }
+            add-member -inputobject $mygroup -membertype ScriptMethod -name SetLights {
+                param($lights)
+                PSHue_GroupSetLights $this.bridgeip $this.userID $this.ID $lights
+                $this.refresh()
+            }
+            add-member -inputobject $mygroup -membertype ScriptMethod -name AddLight {
+                param($light)
+                PSHue_GroupAddLight $this.bridgeip $this.userID $this.ID $light
+                $this.refresh()
+            }
+            add-member -inputobject $mygroup -membertype ScriptMethod -name RemoveLight {
+                param($light)
+                PSHue_GroupRemoveLight $this.bridgeip $this.userID $this.ID $light
+                $this.refresh()
+            }
+            add-member -InputObject $myGroup -MemberType ScriptMethod -Name On {
+                param($on)
+                PSHue_GroupOn $this.bridgeip $this.userID $this.ID $on
+                $this.refresh()
+            }
+            add-member -InputObject $myGroup -MemberType ScriptMethod -Name ColorHue {
+                param($hue,$transtime)
+                PSHue_GroupColorHue $this.bridgeip $this.userID $this.ID $hue $transtime
+                $this.refresh()
+            }
+            add-member -InputObject $myGroup -MemberType ScriptMethod -Name ColorSat {
+                param($sat,$transtime)
+                PSHue_GroupColorSat $this.bridgeip $this.userID $this.ID $sat $transtime
+                $this.refresh()
+            }
+            add-member -InputObject $myGroup -MemberType ScriptMethod -Name Brightness {
+                param($bri,$transtime)
+                PSHue_GroupBrightness $this.bridgeip $this.userID $this.ID $bri $transtime
+                $this.refresh()
+            }
+            add-member -InputObject $myGroup -MemberType ScriptMethod -Name WhiteTemp {
+                param($deg,$transtime)
+                PSHue_GroupWhiteTemp $this.bridgeip $this.userID $this.ID $deg $transtime
+                $this.refresh()
+            }
+            add-member -InputObject $myGroup -MemberType ScriptMethod -Name Loop {
+                param($on,$transtime)
+                PSHue_GroupLoop $this.bridgeip $this.userID $this.ID $on $transtime
+                $this.refresh()
+            }
+            add-member -InputObject $myGroup -MemberType ScriptMethod -Name ShortAlert {
+                PSHue_GroupShortAlert $this.bridgeip $this.userID $this.ID
+            }
+            add-member -InputObject $myGroup -MemberType ScriptMethod -Name LongAlert {
+                PSHue_GroupLongAlert $this.bridgeip $this.userID $this.ID
+            }
+            add-member -InputObject $myGroup -MemberType ScriptMethod -Name StopAlert {
+                PSHue_GroupStopAlert $this.bridgeip $this.userID $this.ID
+            }
+            add-member -InputObject $myGroup -MemberType ScriptMethod -Name SetState {
+                param($on,$bri,$hue,$sat,$xy,$ct,$alert,$effect,$transitiontime)
+                $state = PSHue_NewState $on $bri $hue $sat $xy $ct $alert $effect $transitiontime
+                PSHue_SetGroupState $this.bridgeip $this.userID $this.ID $state
+                $this.refresh()
+            }
+            $this.groups.add($group,$mygroup)
+        }
+        foreach($schedule in ((get-member -InputObject $data.schedules -MemberType NoteProperty).name)){
+            #$this.schedules.add($schedule,$data.schedules.$schedule)
+        }
+        add-member -InputObject $this.Lights -MemberType ScriptMethod -name On -value {
+            param($on)
+            foreach($light in $this.lights.Values){
+                $light.On($on)
+            }
+        }
+
+    }
+    add-member -InputObject $myHue -MemberType ScriptMethod -name ListLights -value {(($this.getfullstate()).lights)}
+    add-member -InputObject $myHue -MemberType ScriptMethod -name ListGroups -value {(($this.getfullstate()).groups)}
+    add-member -InputObject $myHue -MemberType ScriptMethod -name ListSchedules -value {(($this.getfullstate()).schedules)}
+    add-member -InputObject $myHue -MemberType ScriptMethod -name ShowConf -value {(($this.getfullstate()).config)}
+    add-member -InputObject $myhue -MemberType NoteProperty -name Lights -value @{}
+    add-member -InputObject $myhue -MemberType NoteProperty -name Groups -value @{}
+    add-member -InputObject $myhue -MemberType NoteProperty -name Schedules -value @{}
+    add-member -InputObject $myHue -MemberType ScriptMethod -name SearchNewLights -value {
+        return PSHue_SearchNewLights $this.bridgeIP $this.userID
+        $this.fullinit()
+    }
+    add-member -InputObject $myHue -MemberType ScriptMethod -name NewGroup -value {
+        param([string]$name,[array]$lights)
+        $data = PSHue_NewGroup $this.bridgeIP $this.userID $name $lights
+        $this.fullinit()
+        return $data
+    }
+    add-member -InputObject $myHue -MemberType ScriptMethod -name RemoveGroup -value {
+        param($groupID)
+        $data = PSHue_RemoveGroup $this.bridgeIP $this.userID $groupid
+        $this.fullinit()
+        return $data
+    }
+    Add-Member -InputObject $myHue -MemberType ScriptMethod -Name GetNewLights -value {
+        $data = PSHue_GetNewLights $this.bridgeIP $this.userID
+        return $data
+    }
+    add-member -InputObject $myhue -MemberType ScriptMethod -Name ImportScript -Value {
+        param([string]$file)
+        if(-not $file){
+            $file = Read-Host "Script file path"
+        }
+        if((Test-Path $file)){
+            $json = ([string](Get-Content $file)) | ConvertFrom-Json
+            foreach($member in (get-member -inputobject $json -MemberType NoteProperty)){
+        $baseurl = $this.baseURL
+        $url = ""
+        $state = ""
+        $stateurl = ""
+        switch($member.name){  
+            "lights" {
+                $url = $baseurl + "/lights"
+                $state = "state"
+                [array]$toimport = "name"
+            }
+            "groups" {
+                $url = $baseurl + "/groups"
+                $state = "action"
+                [array]$toimport = "name","lights"
+            }
+            "schedules" {
+                $url = $baseurl + "/schedules"
+                [array]$toimport = "name","description","command","time"
+            }
+            "config" {
+                $url = $baseurl + "/config"
+                [array]$toimport = "proxyport","name","swupdate","proxyaddress","linkbutton","ipaddress","netmask","gateway","dhcp","portalservices"
+            }
+        }
+        if($member.name -ne "config"){
+            foreach($submember in (get-member -inputobject $json.($member.Name) -MemberType NoteProperty)){
+                $objecturl = $url + "/" + ($submember.name)
+                $objecturl
+                if($state){
+                    $stateurl = $objecturl + "/" + $state
+                }
+                $myobject = New-Object psobject
+                foreach($item in $toimport){
+                    if($json.($member.name).($submember.name).$item){
+                        Add-Member -InputObject $myobject -MemberType NoteProperty -name $item -Value ($json.($member.name).($submember.name).$item)
+                    }
+                }
+                if(($json.($member.name).($submember.name).$state)){
+                    $stateobject = New-Object psobject
+                    $stateobject = ($json.($member.name).($submember.name).$state)
+                    Invoke-RestMethod $stateurl -Method Put -Body ($stateobject | ConvertTo-Json)
+                }
+                Invoke-RestMethod $objecturl -Method Put -Body ($myobject | ConvertTo-Json)
+            }
+        }
+        else{
+            $objecturl = $url + "/" + ($submember.name)
+            $objecturl
+            if($state){
+                $stateurl = $objecturl + "/" + $state
+            }
+            $myobject = New-Object psobject
+            foreach($item in $toimport){
+                if($json.($member.name).$item){
+                    Add-Member -InputObject $myobject -MemberType NoteProperty -name $item -Value ($json.($member.name).$item)
+                }
+            }
+            if(($json.($member.name).$state)){
+                $stateobject = New-Object psobject
+                $stateobject = ($json.($member.name).$state)
+                Invoke-RestMethod $stateurl -Method Put -Body ($stateobject | ConvertTo-Json)
+            }
+            Invoke-RestMethod $objecturl -Method Put -Body ($myobject | ConvertTo-Json)
+        }
+    }
+        }
+    }#a reprendre
+
+    return $myHue
+}
+
+function PSHue_GetBridgeWeb{
+# returns hub info from web upnp
+    $url = "http://www.meethue.com/api/nupnp"
+    $data = Invoke-RestMethod $url
+    return $data
+}
+
+function PSHue_GetBridgeUpnp{
+# returns the ip address of the last hub found on the local network via UPNP
+    $finder = New-Object -ComObject UPnP.UPnPDeviceFinder;
+    $devices = $finder.FindByType("upnp:rootdevice", 0)
+    foreach($device in $devices){
+        if($device.Description){
+            $data = New-Object psobject
+            if(($device.Description.tolower()).contains("philips hue")){
+                add-member -InputObject $data -MemberType NoteProperty -Name internalipaddress -value ($device.PresentationURL.Split("/")[2])
+            }
+        }
+    }
+    return $data
+}
+
+function PSHue_GetFullstate([string]$bridgeIP, [string]$username){
+# returns the full state of the hub    
+    if(($bridgeIP) -and ($username)){
+        $url = "http://$bridgeIP/api/$username"
+        $data = Invoke-RestMethod $url
+        return $data
+    }
+    else{
+        write-host ("Usage : [object]" + $MyInvocation.MyCommand.Name + " [string]BRIDGE_IP [string]USERNAME") -ForegroundColor Red
+    }
+}
+
+function PSHue_NewState($on=-1,$bri=-1,$hue=-1,$sat=-1,$xy=-1,$ct=-1,$alert=-1,$effect=-1,$transitiontime=-1){
+# returns a "light state" object
+    if((-not ($on -ge 0)) -and (-not ($bri -ge 0)) -and (-not ($hue -ge 0)) -and (-not ($sat -ge 0)) -and (-not ($xy -ge 0)) -and (-not ($ct -ge 0)) -and (-not ($alert -ge 0)) -and (-not ($effect -ge 0)) -and (-not ($transitiontime -ge 0))){
+        # interactive mode
+        write-host ("No parameter. Syntax : [object]" + $MyInvocation.MyCommand.Name + " [bool]ON [int8]BRIGHTNESS [int16]HUE [int8]SATURATION [array of 0..1 value x2]XY [int16]CT [string]ALERT [string]EFFECT [int16]TRANSITIONTIME")
+        Write-Host "Entering Interactive Mode..."
+        $temp = read-host "ON ? (Y/N)"
+        if($temp -eq "Y"){
+            $on = $true
+        }
+        else{
+            $on = $false
+        }
+        do{
+            $bri = read-host "Brightness ? (0-255)"
+        }
+        while(([int]$bri -notin 0..255) -and ($bri -ne ""))
+        if($bri -eq ""){
+            $bri = -1
+        }
+        do{
+            $temp = read-host "Color selection by ? (HUE/XY/CT)"
+        }
+        while($temp -notin ("HUE","XY","CT",""))
+        switch ($temp.ToUpper()){
+            "HUE" {
+                do{
+                    $hue = read-host "Hue ? (0-65535)"
+                }
+                while($hue -notin 0..65535)
+                do{
+                    $sat = read-host "Saturation ? (0-255)"
+                }
+                while($sat -notin 0..255)
+            }
+            "XY"{
+                do{
+                    $xy[0] = read-host "X ? (0-1)"
+                }
+                while(($xy[0] -le 0) -and ($xy[0] -ge 1))
+                do{
+                    $xy[1] = Read-Host "Y ? (0-1)"
+                }
+                while(($xy[1] -le 0) -and ($xy[1] -ge 1))
+            }
+            "CT"{
+                do{
+                    $ct = read-host "CT ? (153-500)"
+                }
+                while($ct -notin 153..500)
+            }
+            default {
+                $hue = $sat = $xy = $ct = -1
+                write-host "No color selection made"
+            }
+        }
+        do{
+            $alert = read-host "Alert ? (none/select/lselect)"
+        }
+        while($alert -notin ("none","select","lselect",""))
+        do{
+            $effect = read-host "Effect ? (none/colorloop)"
+        }
+        while($effect -notin ("none","colorloop",""))
+        do{
+            $transitiontime = read-host "Transition Time ? (0-65535) x100ms"
+        }
+        while(($transitiontime -notin 0..65535) -and ($transitiontime -ne ""))
+        if($transitiontime -eq ""){
+            $transitiontime = -1
+        }
+    }
+    $state = New-Object PSObject
+    if($on -ge 0){
+        Add-Member -inputobject $state -MemberType NoteProperty -name on -value ([bool]$on)
+    }
+    if([int32]$bri -in 0..255){
+        Add-Member -inputobject $state  -MemberType NoteProperty -name bri -value ([int32]$bri)
+    }
+    if([int32]$hue -in 0..65535){
+        Add-Member -inputobject $state -MemberType NoteProperty -name hue -value ([int32]$hue)
+    }
+    if([int32]$sat -in 0..255){
+        Add-Member -inputobject $state -MemberType NoteProperty -name sat -value ([int32]$sat)
+    }
+    if($xy -ge 0){
+        if(($xy.gettype().basetype.name -eq "Array") -and ($xy.count -eq 2)){
+            if((($xy[0] -le 0) -and ($xy[0] -ge 1)) -and (($xy[1] -le 0) -and ($xy[1] -ge 1))){
+                Add-Member -inputobject $state -MemberType NoteProperty -name xy -value $xy
+            }
+        }
+    }
+    if([int32]$ct -in 153..500){
+        Add-Member -inputobject $state -MemberType NoteProperty -name ct -value ([int32]$ct)
+    }
+    if($alert -in ("none","select","lselect")){
+        Add-Member -inputobject $state -MemberType NoteProperty -name alert -value ([string]$alert)
+    }
+    if($effect -in ("none","colorloop")){
+        Add-Member -inputobject $state -MemberType NoteProperty -name effect -value ([string]$effect)
+    }
+    if([int32]$transitiontime -in 0..65535){
+        Add-Member -inputobject $state -MemberType NoteProperty -name transitiontime -value ([int32]$transitiontime)
+    }
+    return $state
+}
+
+function PSHue_SetState([string]$bridgeIP, [string]$username, [string]$type, [int32]$ID, $state){
+
+}
+
+# USER FUNCTIONS
+
+function PSHue_UserExists([string]$bridgeIP, [string]$username){
+# return a boolean whether the user exists or not 
+   if(($bridgeIP) -and ($username)){
+        $result = PSHue_GetFullstate $bridgeIP $username
+        if($result.error){
+            $data = $false
+        }
+        else{
+            $data = $true
+        }
+        return $data
+    }
+    else{
+        write-host ("Usage : [bool]" + $MyInvocation.MyCommand.Name + " [string]BRIDGE_IP [string]USERNAME") -ForegroundColor Red
+    }
+}
+
+function PSHue_RegisterUser([string]$bridgeIP, [string]$username, [string]$appname){
+# register a user on the hub
+   if(($bridgeIP) -and ($username) -and ($appname)){
+        write-host ("Appuyez sur le bouton du bridge.") -ForegroundColor Red
+        start-sleep -s 20
+        $body = New-Object PSObject
+        Add-Member -InputObject $body -membertype NoteProperty -name devicetype -value $appname
+        Add-Member -InputObject $body -membertype NoteProperty -name username -value $username
+        $url = "http://$bridgeIP/api"
+        $data = Invoke-RestMethod $url -Body ($body | ConvertTo-JSON) -Method Post
+        return $data
+    }
+    else{
+        write-host ("Usage : [object]" + $MyInvocation.MyCommand.Name + " [string]BRIDGE_IP [string:10..40]USERNAME [string:40]APPNAME") -ForegroundColor Red
+    }
+}
+
+# LIGHT FUNCTIONS
+
+function PSHue_GetLights([string]$bridgeIP, [string]$username){
+# returns all the lights of the hub
+    if(($bridgeIP) -and ($username)){
+        $url = "http://" + $bridgeIP + "/api/" + $username + "/lights"
+        $data = Invoke-RestMethod $url
+        return $data
+    }
+    else{
+        write-host ("Usage : [object]" + $MyInvocation.MyCommand.Name + " [string]BRIDGE_IP [string]USERNAME") -ForegroundColor Red
+    }
+}
+
+function PSHue_GetNewLights([string]$bridgeIP, [string]$username){
+# returns the lights found on the last research
+    if(($bridgeIP) -and ($username)){
+        $url = "http://" + $bridgeIP + "/api/" + $username + "/lights/new"
+        $data = Invoke-RestMethod $url
+        return $data
+    }
+    else{
+        write-host ("Usage : [object]" + $MyInvocation.MyCommand.Name + " [string]BRIDGE_IP [string]USERNAME") -ForegroundColor Red
+    }
+}
+
+function PSHue_SearchNewLights([string]$bridgeIP, [string]$username){
+# starts a new research of lights and returns the result (timeout of 65s)
+    if(($bridgeIP) -and ($username)){
+        $url = "http://" + $bridgeIP + "/api/" + $username + "/lights"
+        $data = Invoke-RestMethod $url -Method Post
+        if($data.success){
+            $i=0
+            $timeout=65
+            do{
+                $percent = (($i*100) / $timeout)
+                Write-Progress -Activity "SearchNewLights" -status ("Discovering new lights (" + ([int32]$percent).ToString() + "%)") -percentComplete ($percent)
+                $i++
+                Start-Sleep -s 1
+            }
+            while($i -lt $timeout)
+            $data = PSHue_GetNewLights $bridgeIP $username
+        }
+        return $data
+    }
+    else{
+        write-host ("Usage : [object]" + $MyInvocation.MyCommand.Name + " [string]BRIDGE_IP [string]USERNAME") -ForegroundColor Red
+    }
+}
+
+function PSHue_GetLight([string]$bridgeIP, [string]$username, [int32]$lightID){
+# returns a light object from a light ID
+    if(($bridgeIP) -and ($username) -and ($lightID)){
+        $url = "http://" + $bridgeIP + "/api/" + $username + "/lights/" + $lightID
+        $data = Invoke-RestMethod $url
+        return $data
+    }
+    else{
+        write-host ("Usage : [object]" + $MyInvocation.MyCommand.Name + " [string]BRIDGE_IP [string]USERNAME [int32]LIGHT_ID") -ForegroundColor Red
+    }
+}
+
+function PSHue_RenameLight([string]$bridgeIP, [string]$username, [int32]$lightID, [string]$newname){
+# renames a light from its ID then returns the result
+    if(($bridgeIP) -and ($username) -and ($lightID) -and (($newname.length -in 1..32))){
+        $url = "http://" + $bridgeIP + "/api/" + $username + "/lights/" + $lightID
+        $body = New-Object PSObject
+        Add-Member -InputObject $body -membertype NoteProperty -Name name -value $newname
+        $data = Invoke-RestMethod $url -Method Put -Body ($body | ConvertTo-JSON)
+        return $data
+    }
+    else{
+        write-host ("Usage : [object]" + $MyInvocation.MyCommand.Name + " [string]BRIDGE_IP [string]USERNAME [int32]LIGHT_ID [string:32]NEWNAME") -ForegroundColor Red
+    }
+}
+
+function PSHue_SetLightState([string]$bridgeIP, [string]$username, [int32]$lightID, [object]$state){
+# Sets the state of a light
+    if(($bridgeIP) -and ($username) -and ($lightID) -and ($state)){
+        $url = "http://" + $bridgeIP + "/api/" + $username + "/lights/" + $lightID + "/state"
+        $body = $state | ConvertTo-JSON
+        $data = Invoke-RestMethod $url -Method Put -Body $body
+        return $data
+    }
+    else{
+        write-host ("Usage : [object]" + $MyInvocation.MyCommand.Name + " [string]BRIDGE_IP [string]USERNAME [int32]LIGHT_ID [object]STATE (STATE content : on,bri,hue,sat,xy,ct,alert,effect,transitiontime)") -ForegroundColor Red
+    }
+}
+
+function PSHue_LightOn([string]$bridgeIP, [string]$username, [int32]$lightID, $on=-1){
+# gets or sets the "on" state of a light
+    if(($bridgeIP) -and ($username) -and ($lightID)){
+        $url = "http://" + $bridgeIP + "/api/" + $username + "/lights/" + $lightID
+        if($on -ge 0){
+            $url +=  "/state"
+            $mystate = New-Object psobject
+            Add-Member -inputobject $mystate -membertype NoteProperty -name on -value $on
+            $body = $mystate | ConvertTo-JSON
+            $data = Invoke-RestMethod $url -Method Put -Body $body
+        }
+        else{
+            $data = (Invoke-RestMethod $url).state.on
+        }
+        return $data
+    }
+    else{
+        write-host ("Usage : [object]" + $MyInvocation.MyCommand.Name + " [string]BRIDGE_IP [string]USERNAME [int32]LIGHT_ID [bool]ON (optional)") -ForegroundColor Red
+    }
+}
+
+function PSHue_LightColorHue([string]$bridgeIP, [string]$username, [int32]$lightID, [int32]$hue=-1, [int32]$transtime=-1){
+# sets or gets the hue color of a light
+   if(($bridgeIP) -and ($username) -and ($lightID)){
+        $url = "http://" + $bridgeIP + "/api/" + $username + "/lights/" + $lightID
+        if($hue -ge 0){
+            $url += "/state"
+            $mystate = New-Object psobject
+            Add-Member -inputobject $mystate -membertype NoteProperty -name hue -value $hue
+            if($transtime -ge 0){
+                Add-Member -inputobject $mystate -membertype NoteProperty -name transitiontime -value $transtime
+            }
+            $body = $mystate | ConvertTo-JSON
+            $data = Invoke-RestMethod $url -Method Put -Body $body
+        }
+        else{
+            $data = (Invoke-RestMethod $url).state.hue
+        }
+        return $data
+    }
+    else{
+        write-host ("Usage : [object]" + $MyInvocation.MyCommand.Name + " [string]BRIDGE_IP [string]USERNAME [int32]LIGHT_ID [int32]HUE [int32]TRANSITION_TIME (optional)") -ForegroundColor Red
+    }
+}
+
+function PSHue_LightColorSat([string]$bridgeIP, [string]$username, [int32]$lightID, [int32]$sat=-1, [int32]$transtime=-1){
+# sets or gets the color saturation of a light
+    if(($bridgeIP) -and ($username) -and ($lightID)){
+        $url = "http://" + $bridgeIP + "/api/" + $username + "/lights/" + $lightID
+        if($sat -ge 0){
+            $url += "/state"
+            $mystate = New-Object psobject
+            Add-Member -inputobject $mystate -membertype NoteProperty -name sat -value $sat
+            if($transtime -ge 0){
+                Add-Member -inputobject $mystate -membertype NoteProperty -name transitiontime -value $transtime
+            }
+            $body = $mystate | ConvertTo-JSON
+            $data = Invoke-RestMethod $url -Method Put -Body $body
+        }
+        else{
+            $data = (Invoke-RestMethod $url).state.sat
+        }
+        return $data
+    }
+    else{
+        write-host ("Usage : [object]" + $MyInvocation.MyCommand.Name + " [string]BRIDGE_IP [string]USERNAME [int32]LIGHT_ID [int32]SATURATION [int32]TRANSITION_TIME (optional)") -ForegroundColor Red
+    }
+}
+
+function PSHue_LightBrightness([string]$bridgeIP, [string]$username, [int32]$lightID, [int32]$bri=-1,[int32]$transtime=-1){
+# sets or gets the brightness of a light
+    if(($bridgeIP) -and ($username) -and ($lightID)){
+        $url = "http://" + $bridgeIP + "/api/" + $username + "/lights/" + $lightID
+        if($bri -ge 0){
+            $url += "/state"
+            $mystate = New-Object psobject
+            Add-Member -inputobject $mystate -membertype NoteProperty -name bri -value $bri
+            if($transtime -ge 0){
+                Add-Member -inputobject $mystate -membertype NoteProperty -name transitiontime -value $transtime
+            }
+            $body = $mystate | ConvertTo-JSON
+            $data = Invoke-RestMethod $url -Method Put -Body $body
+        }
+        else{
+            $data = (Invoke-RestMethod $url).state.bri
+        }
+        return $data
+    }
+    else{
+        write-host ("Usage : [object]" + $MyInvocation.MyCommand.Name + " [string]BRIDGE_IP [string]USERNAME [int32]LIGHT_ID [int32]BRIGHTNESS [int32]TRANSITION_TIME (optional)") -ForegroundColor Red
+    }
+}
+           
+function PSHue_LightWhiteTemp([string]$bridgeIP, [string]$username, [int32]$lightID, [int32]$deg=-1,[int32]$transtime=-1){
+# sets or gets the whitetemp of a light
+    if(($bridgeIP) -and ($username) -and ($lightID)){
+        $url = "http://" + $bridgeIP + "/api/" + $username + "/lights/" + $lightID
+        if($deg -ge 0){
+            $url += "/state"
+            $mystate = New-Object psobject
+            Add-Member -inputobject $mystate -membertype NoteProperty -name ct -value (1000000/$deg)
+            if($transtime -ge 0){
+                Add-Member -inputobject $mystate -membertype NoteProperty -name transitiontime -value $transtime
+            }
+            $body = $mystate | ConvertTo-JSON
+            $data = Invoke-RestMethod $url -Method Put -Body $body
+        }
+        else{
+            $data = (1000000/((Invoke-RestMethod $url).state.ct))
+        }
+        return $data
+    }
+    else{
+        write-host ("Usage : [object]" + $MyInvocation.MyCommand.Name + " [string]BRIDGE_IP [string]USERNAME [int32]LIGHT_ID [int32]KELVIN_DEGREES [int32]TRANSITION_TIME (optional)") -ForegroundColor Red
+    }
+}
+
+function PSHue_LightLoop([string]$bridgeIP, [string]$username, [int32]$lightID, $on=-1,[int32]$transtime=-1){
+# sets or gets the loop effect of a light
+    if(($bridgeIP) -and ($username) -and ($lightID)){
+        $url = "http://" + $bridgeIP + "/api/" + $username + "/lights/" + $lightID
+        if($on -ge 0){
+            $url += "/state"
+            $mystate = New-Object psobject
+            if($on){
+                Add-Member -inputobject $mystate -membertype NoteProperty -name effect -value "colorloop"
+            }
+            else{
+                Add-Member -inputobject $mystate -membertype NoteProperty -name effect -value "none"
+            }
+            if($transtime -ge 0){
+                Add-Member -inputobject $mystate -membertype NoteProperty -name transitiontime -value $transtime
+            }
+            $body = $mystate | ConvertTo-JSON
+            $data = Invoke-RestMethod $url -Method Put -Body $body
+        }
+        else{
+            $data = (Invoke-RestMethod $url).state.effect
+        }
+        return $data
+    }
+    else{
+        write-host ("Usage : [object]" + $MyInvocation.MyCommand.Name + " [string]BRIDGE_IP [string]USERNAME [int32]LIGHT_ID [bool]LOOP [int32]TRANSITION_TIME (optional)") -ForegroundColor Red
+    }
+}
+
+function PSHue_LightShortAlert([string]$bridgeIP, [string]$username, [int32]$lightID){
+# sets a shortalert for a light
+    if(($bridgeIP) -and ($username) -and ($lightID)){
+        $url = "http://" + $bridgeIP + "/api/" + $username + "/lights/" + $lightID + "/state"
+        $mystate = New-Object psobject
+        Add-Member -inputobject $mystate -membertype NoteProperty -name alert -value "select"
+        $body = $mystate | ConvertTo-JSON
+        $data = Invoke-RestMethod $url -Method Put -Body $body
+        return $data
+    }
+    else{
+        write-host ("Usage : [object]" + $MyInvocation.MyCommand.Name + " [string]BRIDGE_IP [string]USERNAME [int32]LIGHT_ID") -ForegroundColor Red
+    }
+}
+
+function PSHue_LightLongAlert([string]$bridgeIP, [string]$username, [int32]$lightID){
+# sets a longalert for a light
+    if(($bridgeIP) -and ($username) -and ($lightID)){
+        $url = "http://" + $bridgeIP + "/api/" + $username + "/lights/" + $lightID + "/state"
+        $mystate = New-Object psobject
+        Add-Member -inputobject $mystate -membertype NoteProperty -name alert -value "lselect"
+        $body = $mystate | ConvertTo-JSON
+        $data = Invoke-RestMethod $url -Method Put -Body $body
+        return $data
+    }
+    else{
+        write-host ("Usage : [object]" + $MyInvocation.MyCommand.Name + " [string]BRIDGE_IP [string]USERNAME [int32]LIGHT_ID") -ForegroundColor Red
+    }
+}
+
+function PSHue_LightStopAlert([string]$bridgeIP, [string]$username, [int32]$lightID){
+# stops an alert for a light
+    if(($bridgeIP) -and ($username) -and ($lightID)){
+        $url = "http://" + $bridgeIP + "/api/" + $username + "/lights/" + $lightID + "/state"
+        $mystate = New-Object psobject
+        Add-Member -inputobject $mystate -membertype NoteProperty -name alert -value "none"
+        $body = $mystate | ConvertTo-JSON
+        $data = Invoke-RestMethod $url -Method Put -Body $body
+        return $data
+    }
+    else{
+        write-host ("Usage : [object]" + $MyInvocation.MyCommand.Name + " [string]BRIDGE_IP [string]USERNAME [int32]LIGHT_ID") -ForegroundColor Red
+    }
+}
+
+# GROUPS
+
+function PSHue_GetGroups([string]$bridgeIP, [string]$username){
+# returns the groups of a hub
+    if(($bridgeIP) -and ($username)){
+        $url = "http://" + $bridgeIP + "/api/" + $username + "/groups"
+        $data = Invoke-RestMethod $url
+        return $data
+    }
+    else{
+        write-host ("Usage : [object]" + $MyInvocation.MyCommand.Name + " [string]BRIDGE_IP [string]USERNAME") -ForegroundColor Red
+    }
+}
+
+function PSHue_NewGroup([string]$bridgeIP, [string]$username, [string]$groupname, [array]$lights){
+# creates a new group
+    if(($bridgeIP) -and ($username) -and ($groupname) -and $lights){
+        for($i=0 ;$i -lt $lights.Count;$i++){
+            $lights[$i] = $lights[$i].ToString()
+        }
+        $url = "http://" + $bridgeIP + "/api/" + $username + "/groups"
+        $body = New-Object psobject
+        add-member -InputObject $body -MemberType NoteProperty -Name name -Value $name
+        add-member -InputObject $body -MemberType NoteProperty -Name lights -Value $lights
+        $data = Invoke-RestMethod $url -Method Post -Body ($body | ConvertTo-Json)
+        return $data
+        }
+    else{
+        write-host ("Usage : [object]" + $MyInvocation.MyCommand.Name + " [string]BRIDGE_IP [string]USERNAME [string]GROUPNAME [array]LIGHTS") -ForegroundColor Red
+    }
+}
+
+function PSHue_RemoveGroup([string]$bridgeIP, [string]$username, $id){
+# deletes a group from its ID
+    if(($bridgeIP) -and ($username) -and ($id)){
+        $url = (($this.baseurl) + "/groups/" + $id.ToString())
+        $data = Invoke-RestMethod $url -Method Delete
+        $this.fullinit()
+        return $data
+    }
+    else{
+        write-host ("Usage : [object]" + $MyInvocation.MyCommand.Name + " [string]BRIDGE_IP [string]USERNAME [string or int32]GROUP_ID") -ForegroundColor Red
+    }
+}
+
+function PSHue_GetGroup([string]$bridgeIP, [string]$username, [int32]$groupID){
+# returns a group object from its ID
+    if(($bridgeIP) -and ($username) -and ($groupID)){
+        $url = "http://" + $bridgeIP + "/api/" + $username + "/groups/" + $groupID
+        $data = Invoke-RestMethod $url
+        return $data
+    }
+    else{
+        write-host ("Usage : [object]" + $MyInvocation.MyCommand.Name + " [string]BRIDGE_IP [string]USERNAME [int32]GROUP_ID") -ForegroundColor Red
+    }
+}
+
+function PSHue_SetGroup([string]$bridgeIP, [string]$username, [int32]$groupID, [string]$newname, [array]$lights){
+# set the attributes of a group (name & lights)
+    if(($bridgeIP) -and ($username) -and ($groupID) -and ($newname) -and ($newname.length -le 32) -and ($lights)){
+        $url = "http://" + $bridgeIP + "/api/" + $username + "/groups/" + $groupID
+        $body = New-Object PSObject
+        Add-Member -InputObject $body -MemberType NoteProperty -name name -value $newname
+        Add-Member -InputObject $body -MemberType NoteProperty -name lights -value $lights
+        $data = Invoke-RestMethod $url -Method Put -Body ($body | ConvertTo-JSON)
+        return $data
+    }
+    else{
+        write-host ("Usage : [object]" + $MyInvocation.MyCommand.Name + " [string]BRIDGE_IP [string]USERNAME [int32]GROUP_ID [string:32]NEWNAME [array]LIGHTS") -ForegroundColor Red
+    }
+}
+
+function PSHue_SetGroupState([string]$bridgeIP, [string]$username, [int32]$groupID, [object]$state){
+# sets the state of a group from its ID
+    if(($bridgeIP) -and ($username) -and ($groupID) -and ($state)){
+        $url = "http://" + $bridgeIP + "/api/" + $username + "/groups/" + $groupID + "/action"
+        $body = $state | ConvertTo-JSON
+        $data = Invoke-RestMethod $url -Method Put -Body $body
+        return $data
+    }
+    else{
+        write-host ("Usage : [object]" + $MyInvocation.MyCommand.Name + " [string]BRIDGE_IP [string]USERNAME [int32]GROUP_ID [object]STATE (STATE content : on,bri,hue,sat,xy,ct,alert,effect,transitiontime)") -ForegroundColor Red
+    }
+}
+
+function PSHue_RenameGroup([string]$bridgeIP, [string]$username, [int32]$groupID, [string]$newname){
+# renames a light from its ID then returns the result
+    if(($bridgeIP) -and ($username) -and ($lightID) -and (($newname.length -in 1..32))){
+        $url = "http://" + $bridgeIP + "/api/" + $username + "/groups/" + $lightID
+        $body = New-Object PSObject
+        Add-Member -InputObject $body -membertype NoteProperty -Name name -value $newname
+        $data = Invoke-RestMethod $url -Method Put -Body ($body | ConvertTo-JSON)
+        return $data
+    }
+    else{
+        write-host ("Usage : [object]" + $MyInvocation.MyCommand.Name + " [string]BRIDGE_IP [string]USERNAME [int32]GROUP_ID [string:32]NEWNAME") -ForegroundColor Red
+    }
+}
+
+function PSHue_GroupOn([string]$bridgeIP, [string]$username, [int32]$GroupID, $on=-1){
+# gets or sets the "on" state of a Group
+    if(($bridgeIP) -and ($username) -and ($GroupID)){
+        $url = "http://" + $bridgeIP + "/api/" + $username + "/groups/" + $GroupID
+        if($on -ge 0){
+            $url +=  "/action"
+            $mystate = New-Object psobject
+            Add-Member -inputobject $mystate -membertype NoteProperty -name on -value $on
+            $body = $mystate | ConvertTo-JSON
+            $data = Invoke-RestMethod $url -Method Put -Body $body
+        }
+        else{
+            $data = (Invoke-RestMethod $url).action.on
+        }
+        return $data
+    }
+    else{
+        write-host ("Usage : [object]" + $MyInvocation.MyCommand.Name + " [string]BRIDGE_IP [string]USERNAME [int32]Group_ID [bool]ON (optional)") -ForegroundColor Red
+    }
+}
+
+function PSHue_GroupColorHue([string]$bridgeIP, [string]$username, [int32]$GroupID, [int32]$hue=-1, [int32]$transtime=-1){
+# sets or gets the hue color of a Group
+   if(($bridgeIP) -and ($username) -and ($GroupID)){
+        $url = "http://" + $bridgeIP + "/api/" + $username + "/groups/" + $GroupID
+        if($hue -ge 0){
+            $url += "/action"
+            $mystate = New-Object psobject
+            Add-Member -inputobject $mystate -membertype NoteProperty -name hue -value $hue
+            if($transtime -ge 0){
+                Add-Member -inputobject $mystate -membertype NoteProperty -name transitiontime -value $transtime
+            }
+            $body = $mystate | ConvertTo-JSON
+            $data = Invoke-RestMethod $url -Method Put -Body $body
+        }
+        else{
+            $data = (Invoke-RestMethod $url).action.hue
+        }
+        return $data
+    }
+    else{
+        write-host ("Usage : [object]" + $MyInvocation.MyCommand.Name + " [string]BRIDGE_IP [string]USERNAME [int32]Group_ID [int32]HUE [int32]TRANSITION_TIME (optional)") -ForegroundColor Red
+    }
+}
+
+function PSHue_GroupColorSat([string]$bridgeIP, [string]$username, [int32]$GroupID, [int32]$sat=-1, [int32]$transtime=-1){
+# sets or gets the color saturation of a Group
+    if(($bridgeIP) -and ($username) -and ($GroupID)){
+        $url = "http://" + $bridgeIP + "/api/" + $username + "/groups/" + $GroupID
+        if($sat -ge 0){
+            $url += "/action"
+            $mystate = New-Object psobject
+            Add-Member -inputobject $mystate -membertype NoteProperty -name sat -value $sat
+            if($transtime -ge 0){
+                Add-Member -inputobject $mystate -membertype NoteProperty -name transitiontime -value $transtime
+            }
+            $body = $mystate | ConvertTo-JSON
+            $data = Invoke-RestMethod $url -Method Put -Body $body
+        }
+        else{
+            $data = (Invoke-RestMethod $url).action.sat
+        }
+        return $data
+    }
+    else{
+        write-host ("Usage : [object]" + $MyInvocation.MyCommand.Name + " [string]BRIDGE_IP [string]USERNAME [int32]Group_ID [int32]SATURATION [int32]TRANSITION_TIME (optional)") -ForegroundColor Red
+    }
+}
+
+function PSHue_GroupBrightness([string]$bridgeIP, [string]$username, [int32]$GroupID, [int32]$bri=-1,[int32]$transtime=-1){
+# sets or gets the brightness of a Group
+    if(($bridgeIP) -and ($username) -and ($GroupID)){
+        $url = "http://" + $bridgeIP + "/api/" + $username + "/groups/" + $GroupID
+        if($bri -ge 0){
+            $url += "/action"
+            $mystate = New-Object psobject
+            Add-Member -inputobject $mystate -membertype NoteProperty -name bri -value $bri
+            if($transtime -ge 0){
+                Add-Member -inputobject $mystate -membertype NoteProperty -name transitiontime -value $transtime
+            }
+            $body = $mystate | ConvertTo-JSON
+            $data = Invoke-RestMethod $url -Method Put -Body $body
+        }
+        else{
+            $data = (Invoke-RestMethod $url).action.bri
+        }
+        return $data
+    }
+    else{
+        write-host ("Usage : [object]" + $MyInvocation.MyCommand.Name + " [string]BRIDGE_IP [string]USERNAME [int32]Group_ID [int32]BRIGHTNESS [int32]TRANSITION_TIME (optional)") -ForegroundColor Red
+    }
+}
+           
+function PSHue_GroupWhiteTemp([string]$bridgeIP, [string]$username, [int32]$GroupID, [int32]$deg=-1,[int32]$transtime=-1){
+# sets or gets the whitetemp of a Group
+    if(($bridgeIP) -and ($username) -and ($GroupID)){
+        $url = "http://" + $bridgeIP + "/api/" + $username + "/groups/" + $GroupID
+        if($deg -ge 0){
+            $url += "/action"
+            $mystate = New-Object psobject
+            Add-Member -inputobject $mystate -membertype NoteProperty -name ct -value (1000000/$deg)
+            if($transtime -ge 0){
+                Add-Member -inputobject $mystate -membertype NoteProperty -name transitiontime -value $transtime
+            }
+            $body = $mystate | ConvertTo-JSON
+            $data = Invoke-RestMethod $url -Method Put -Body $body
+        }
+        else{
+            $data = (1000000/((Invoke-RestMethod $url).action.ct))
+        }
+        return $data
+    }
+    else{
+        write-host ("Usage : [object]" + $MyInvocation.MyCommand.Name + " [string]BRIDGE_IP [string]USERNAME [int32]Group_ID [int32]KELVIN_DEGREES [int32]TRANSITION_TIME (optional)") -ForegroundColor Red
+    }
+}
+
+function PSHue_GroupLoop([string]$bridgeIP, [string]$username, [int32]$GroupID, $on=-1,[int32]$transtime=-1){
+# sets or gets the loop effect of a Group
+    if(($bridgeIP) -and ($username) -and ($GroupID)){
+        $url = "http://" + $bridgeIP + "/api/" + $username + "/groups/" + $GroupID
+        if($on -ge 0){
+            $url += "/action"
+            $mystate = New-Object psobject
+            if($on){
+                Add-Member -inputobject $mystate -membertype NoteProperty -name effect -value "colorloop"
+            }
+            else{
+                Add-Member -inputobject $mystate -membertype NoteProperty -name effect -value "none"
+            }
+            if($transtime -ge 0){
+                Add-Member -inputobject $mystate -membertype NoteProperty -name transitiontime -value $transtime
+            }
+            $body = $mystate | ConvertTo-JSON
+            $data = Invoke-RestMethod $url -Method Put -Body $body
+        }
+        else{
+            $data = (Invoke-RestMethod $url).action.effect
+        }
+        return $data
+    }
+    else{
+        write-host ("Usage : [object]" + $MyInvocation.MyCommand.Name + " [string]BRIDGE_IP [string]USERNAME [int32]Group_ID [bool]LOOP [int32]TRANSITION_TIME (optional)") -ForegroundColor Red
+    }
+}
+
+function PSHue_GroupShortAlert([string]$bridgeIP, [string]$username, [int32]$GroupID){
+# sets a shortalert for a Group
+    if(($bridgeIP) -and ($username) -and ($GroupID)){
+        $url = "http://" + $bridgeIP + "/api/" + $username + "/groups/" + $GroupID + "/action"
+        $mystate = New-Object psobject
+        Add-Member -inputobject $mystate -membertype NoteProperty -name alert -value "select"
+        $body = $mystate | ConvertTo-JSON
+        $data = Invoke-RestMethod $url -Method Put -Body $body
+        return $data
+    }
+    else{
+        write-host ("Usage : [object]" + $MyInvocation.MyCommand.Name + " [string]BRIDGE_IP [string]USERNAME [int32]GROUP_ID") -ForegroundColor Red
+    }
+}
+
+function PSHue_GroupLongAlert([string]$bridgeIP, [string]$username, [int32]$groupID){
+# sets a longalert for a Group
+    if(($bridgeIP) -and ($username) -and ($GroupID)){
+        $url = "http://" + $bridgeIP + "/api/" + $username + "/groups/" + $GroupID + "/action"
+        $mystate = New-Object psobject
+        Add-Member -inputobject $mystate -membertype NoteProperty -name alert -value "lselect"
+        $body = $mystate | ConvertTo-JSON
+        $data = Invoke-RestMethod $url -Method Put -Body $body
+        return $data
+    }
+    else{
+        write-host ("Usage : [object]" + $MyInvocation.MyCommand.Name + " [string]BRIDGE_IP [string]USERNAME [int32]Group_ID") -ForegroundColor Red
+    }
+}
+
+function PSHue_GroupStopAlert([string]$bridgeIP, [string]$username, [int32]$groupID){
+# stops an alert for a Group
+    if(($bridgeIP) -and ($username) -and ($GroupID)){
+        $url = "http://" + $bridgeIP + "/api/" + $username + "/groups/" + $GroupID + "/action"
+        $mystate = New-Object psobject
+        Add-Member -inputobject $mystate -membertype NoteProperty -name alert -value "none"
+        $body = $mystate | ConvertTo-JSON
+        $data = Invoke-RestMethod $url -Method Put -Body $body
+        return $data
+    }
+    else{
+        write-host ("Usage : [object]" + $MyInvocation.MyCommand.Name + " [string]BRIDGE_IP [string]USERNAME [int32]Group_ID") -ForegroundColor Red
+    }
+}
+
+function PSHue_GroupGetLights([string]$bridgeIP, [string]$username, [int32]$GroupID){
+# gets the lights of a group
+    if(($bridgeIP) -and ($username) -and ($GroupID)){
+        $data = (PSHue_GetGroup $bridgeIP $username $groupID).lights
+        return $data
+    }
+    else{
+        write-host ("Usage : [object]" + $MyInvocation.MyCommand.Name + " [string]BRIDGE_IP [string]USERNAME [int32]GROUP_ID") -ForegroundColor Red
+    }
+}
+
+function PSHue_GroupSetLights([string]$bridgeIP, [string]$username, [int32]$groupID, [array]$lights){
+# sets an entire set of lights in a group
+    if(($bridgeIP) -and ($username) -and ($GroupID) -and ($lights)){
+        $url = "http://" + $bridgeIP + "/api/" + $username + "/groups/" + $GroupID
+        $body = New-Object PSObject
+        Add-Member -InputObject $body -MemberType NoteProperty -name lights -value $lights
+        $data = Invoke-RestMethod $url -Method Put -Body ($body | ConvertTo-JSON)
+        $this.refresh()
+        return $data
+    }
+    else{
+        write-host ("Usage : [object]" + $MyInvocation.MyCommand.Name + " [string]BRIDGE_IP [string]USERNAME [int32]GROUP_ID [array]LIGHTS") -ForegroundColor Red
+    }
+}
+
+function PSHue_GroupAddLight([string]$bridgeIP, [string]$username, [int32]$groupID, $light){
+# adds a light to a group
+    if(($bridgeIP) -and ($username) -and ($GroupID) -and ($lights)){
+        $lights = PSHue_GroupGetLights $bridgeIP $username $GroupID
+        if(-not ($lights.Contains(($light.tostring())))){
+            $lights += $light.ToString()
+            $url = "http://" + $bridgeIP + "/api/" + $username + "/groups/" + $GroupID
+            $body = New-Object PSObject
+            Add-Member -InputObject $body -MemberType NoteProperty -name lights -value $lights
+            $data = Invoke-RestMethod $url -Method Put -Body ($body | ConvertTo-JSON)
+            return $data
+        }
+    }
+    else{
+        write-host ("Usage : [object]" + $MyInvocation.MyCommand.Name + " [string]BRIDGE_IP [string]USERNAME [int32]GROUP_ID [int32]LIGHT") -ForegroundColor Red
+    }
+}
+
+function PSHue_GroupRemoveLight([string]$bridgeIP, [string]$username, [int32]$groupID, $light){
+# removes a light from a group
+    if(($bridgeIP) -and ($username) -and ($GroupID) -and ($lights)){
+        $lights = PSHue_GroupGetLights $bridgeIP $username $GroupID
+        if(($lights.Contains(($light.tostring())))){
+            $templights = @()
+            foreach($item in $lights){
+                if($item.ToString() -ne $light.ToString()){
+                    $templights += $item
+                }
+            }
+            $lights = $templights
+            $url = "http://" + $bridgeIP + "/api/" + $username + "/groups/" + $GroupID
+            $body = New-Object PSObject
+            Add-Member -InputObject $body -MemberType NoteProperty -name lights -value $lights
+            $data = Invoke-RestMethod $url -Method Put -Body ($body | ConvertTo-JSON)
+            return $data
+        }
+    }
+    else{
+        write-host ("Usage : [object]" + $MyInvocation.MyCommand.Name + " [string]BRIDGE_IP [string]USERNAME [int32]GROUP_ID [int32]LIGHT") -ForegroundColor Red
+    }
+}
+
+# SCHEDULES
+
+function PSHue_GetSchedules([string]$bridgeIP, [string]$username){
+# returns all the schedules of the hub 
+    if(($bridgeIP) -and ($username)){
+        $url = "http://" + $bridgeIP + "/api/" + $username + "/schedules"
+        $data = Invoke-RestMethod $url
+        return $data
+    }
+    else{
+        write-host ("Usage : [object]" + $MyInvocation.MyCommand.Name + " [string]BRIDGE_IP [string]USERNAME") -ForegroundColor Red
+    }
+}
+
+function PSHue_NewScheduleCommand([string]$url, [string]$method, [object]$body){
+    ##TODO
+}
+
+function PSHue_NewSchedule([string]$bridgeIP, [string]$username, [string]$schedulename, [string]$description, [object]$command, [datetime]$datetime){
+# create a new schedule
+    if(($bridgeIP) -and ($username) -and ($schedulename) -and ($command) -and ($description) -and ($datetime)){
+        $url = "http://" + $bridgeIP + "/api/" + $username + "/schedules"
+        $body = New-Object PSObject
+        Add-Member -InputObject $body -MemberType NoteProperty -name name -value $schedulename
+        Add-Member -InputObject $body -MemberType NoteProperty -name description -value $description
+        Add-Member -InputObject $body -MemberType NoteProperty -name command -value $command
+        Add-Member -InputObject $body -MemberType NoteProperty -name time -value ($datetime.ToString("yyyy-MM-ddTHH:mm:ss"))
+        $data = Invoke-RestMethod $url -Method Post -Body ($body | ConvertTo-JSON)
+        return $data
+    }
+    else{
+        write-host ("Usage : [object]" + $MyInvocation.MyCommand.Name + " [string]BRIDGE_IP [string]USERNAME [string]SCHEDULENAME [object]COMMAND") -ForegroundColor Red
+    }
+}
+
+function PSHue_GetSchedule([string]$bridgeIP, [string]$username, [int32]$scheduleID){
+# returns a schedule from its ID
+    if(($bridgeIP) -and ($username) -and ($scheduleID)){
+        $url = "http://" + $bridgeIP + "/api/" + $username + "/schedules/" + $scheduleID
+        $data = Invoke-RestMethod $url
+        return $data
+    }
+    else{
+        write-host ("Usage : [object]" + $MyInvocation.MyCommand.Name + " [string]BRIDGE_IP [string]USERNAME [int32]SCHEDULE_ID") -ForegroundColor Red
+    }
+}
+
+function PSHue_SetSchedule([string]$bridgeIP, [string]$username, [int32]$scheduleID, [string]$schedulename, [string]$description, [object]$command, [datetime]$datetime){
+# sets the schedule attributes
+#A REPRENDRE POUR INTEGRER LA NOTION D'OPTIONALITE
+    if(($bridgeIP) -and ($username) -and ($schedulename) -and ($command) -and ($description) -and ($datetime)){
+        $url = "http://" + $bridgeIP + "/api/" + $username + "/schedules"
+        $body = New-Object PSObject
+        Add-Member -InputObject $body -MemberType NoteProperty -name name -value $schedulename |
+        Add-Member -InputObject $body -MemberType NoteProperty -name description -value $description |
+        Add-Member -InputObject $body -MemberType NoteProperty -name command -value ($command | ConvertTo-Json) |
+        Add-Member -InputObject $body -MemberType NoteProperty -name time -value ($datetime.ToString("yyyy-MM-ddTHH:mm:ss"))
+        $data = Invoke-RestMethod $url -Method Post -Body ($body | ConvertTo-JSON)
+        return $data
+    }
+    else{
+        write-host ("Usage : [object]" + $MyInvocation.MyCommand.Name + " [string]BRIDGE_IP [string]USERNAME [int32]SCHEDULE_ID [string:32]NEWNAME [string:64]DESCRIPTION [object]COMMAND [datetime]DATETIME") -ForegroundColor Red
+    }
+}
+
+function PSHue_RemoveSchedule([string]$bridgeIP, [string]$username, [int32]$scheduleID){
+# deletes a schedule from its ID
+    if(($bridgeIP) -and ($username) -and ($scheduleID)){
+        $url = "http://" + $bridgeIP + "/api/" + $username + "/schedules/" + $scheduleID
+        $data = Invoke-RestMethod $url -Method Delete
+        return $data
+    }
+    else{
+        write-host ("Usage : [object]" + $MyInvocation.MyCommand.Name + " [string]BRIDGE_IP [string]USERNAME [int32]SCHEDULE_ID") -ForegroundColor Red
+    }
+}
+
+Export-ModuleMember -Function * -Alias *
